@@ -189,6 +189,7 @@ struct Material
 	int32_t enableLighting;
 	float padding[3];
 	Matrix4x4 uvTransform;
+	float shininess;
 };
 
 struct TransformationMatrix
@@ -213,6 +214,11 @@ struct ModelData
 {
 	std::vector<VertexData> vertices;
 	MaterialData material;
+};
+
+struct CameraForGPU
+{
+	Vector3 worldPosition;
 };
 
 #pragma endregion
@@ -242,7 +248,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 
 // Dump出力
-static LONG WINAPI ExportDump(EXCEPTION_POINTERS* exception) {
+static LONG WINAPI ExportDump(EXCEPTION_POINTERS *exception) {
 
 	// 時刻を取得して、時刻を名前に入れたファイルを作成。Dumpsディレクトリ以下に出力
 	SYSTEMTIME time;
@@ -472,23 +478,33 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	//----RootParameter----
 
 	// RootParameter作成。PixelShaderのMaterialとVertexShaderのTransform
-	D3D12_ROOT_PARAMETER rootParameters[4] = {};
+	D3D12_ROOT_PARAMETER rootParameters[5] = {};
+
+	// [0] Material (PS, b0)
 	rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; // CBVを使う
 	rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL; // PixelShaderで使う
 	rootParameters[0].Descriptor.ShaderRegister = 0; // レジスタ番号0とバインド
 
+	// [1] Transform (VS, b0)
 	rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; // CBVを使う
 	rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX; // VertexShaderで使う
 	rootParameters[1].Descriptor.ShaderRegister = 0; // レジスタ番号0を使う
 
+	// [2] Texture SRV (PS, t0)
 	rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; // DescriptorTableを使う
 	rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL; // PixelShaderで使う
 	rootParameters[2].DescriptorTable.pDescriptorRanges = descriptorRange;
 	rootParameters[2].DescriptorTable.NumDescriptorRanges = _countof(descriptorRange); // Tableで利用する数
 
+	// [3] DirectionalLight (PS, b1)
 	rootParameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; // CBVを使う
 	rootParameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL; // PixelShaderで使う
 	rootParameters[3].Descriptor.ShaderRegister = 1; // レジスタ番号1を使う
+
+	// [4] Camera (PS, b2)
+	rootParameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	rootParameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+	rootParameters[4].Descriptor.ShaderRegister = 2;
 
 	descriptionRootSignature.pParameters = rootParameters; // ルートパラメータ配列へのポインタ
 	descriptionRootSignature.NumParameters = _countof(rootParameters); // 配列の長さ
@@ -906,7 +922,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	Transform transformSphereInit;
 
 	// SphereTransform変数を作る
-	Transform transformSphere { {1.0f,1.0f,1.0f},{0.0f,0.0f,0.0f},{0.0f,0.0f,0.0f} };
+	Transform transformSphere { {1.0f,1.0f,1.0f},{0.0f,-1.6f,0.0f},{0.0f,0.0f,0.0f} };
 	transformSphereInit = transformSphere;
 
 	// SphereCamera変数を作る
@@ -937,6 +953,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	materialDataSphere->color = Vector4(1.0f, 1.0f, 1.0f, 1.0f);
 	materialDataSphere->enableLighting = false;
 	materialDataSphere->uvTransform = MakeIdentity4x4();
+	materialDataSphere->shininess = 8.0f;
 
 	/**************************************************
 	* ランバート反射
@@ -954,6 +971,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	directionalLightDataSphere->color = { 1.0f,1.0f,1.0f,1.0f };
 	directionalLightDataSphere->direction = { 0.0f,-1.0f,0.0f };
 	directionalLightDataSphere->intensity = 1.0f;
+
+	Microsoft::WRL::ComPtr<ID3D12Resource> cameraResource = dxCommon->CreateBufferResource(sizeof(CameraForGPU));
+	CameraForGPU *cameraData = nullptr;
+	cameraResource->Map(0, nullptr, reinterpret_cast<void **>(&cameraData));
+	cameraData->worldPosition = cameraTransformSphere.translate;
 
 #pragma endregion
 
@@ -1063,7 +1085,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 #pragma region テクスチャを読み込んで使う
 
 	// Textureを読んで転送する
-	DirectX::ScratchImage mipImages = dxCommon->LoadTexture("resources/textures/uvChecker.png");
+	DirectX::ScratchImage mipImages = dxCommon->LoadTexture("resources/textures/monsterBall.png");
 	const DirectX::TexMetadata &metadata = mipImages.GetMetadata();
 	Microsoft::WRL::ComPtr<ID3D12Resource> textureResource = dxCommon->CreateTextureResource(metadata);
 	Microsoft::WRL::ComPtr<ID3D12Resource> intermediateResource = dxCommon->UploadTextureData(textureResource, mipImages);
@@ -1113,9 +1135,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	bool useLightingTriangle = false;
 	bool useLightingSphere = false;
 
-	bool showModelData = true;
+	bool showModelData = false;
 	bool showTriangle = false;
-	bool showSphere = false;
+	bool showSphere = true;
 	bool showSprite = false;
 
 #pragma endregion
@@ -1177,7 +1199,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::Begin("Settings");
 
 		// 対象選択
-		static int current = 0;
+		static int current = 1;
 		const char *targets[] = { "ModelData","Sphere", "Sprite","Triangle" };
 		ImGui::Combo("Target", &current, targets, IM_ARRAYSIZE(targets));
 
@@ -1319,7 +1341,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 	#pragma region ワールド・ビュー・プロジェクション行列計算: 3D Object (Sphere)
 
-		transformSphere.rotate.y += 0.01f;
+		//transformSphere.rotate.y += 0.01f;
 		Matrix4x4 worldMatrixSphere = MakeAffineMatrix(transformSphere.scale, transformSphere.rotate, transformSphere.translate);
 		Matrix4x4 cameraMatrixSphere = MakeAffineMatrix(cameraTransformSphere.scale, cameraTransformSphere.rotate, cameraTransformSphere.translate);
 		Matrix4x4 viewMatrixSphere = Inverse(cameraMatrixSphere);
@@ -1415,8 +1437,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 			dxCommon->GetCommandList()->SetGraphicsRootConstantBufferView(0, materialResourceSphere->GetGPUVirtualAddress());
 			dxCommon->GetCommandList()->SetGraphicsRootConstantBufferView(1, wvpResourceSphere->GetGPUVirtualAddress());
-			dxCommon->GetCommandList()->SetGraphicsRootDescriptorTable(2, textureSrvHandleGPU2);
+			dxCommon->GetCommandList()->SetGraphicsRootDescriptorTable(2, textureSrvHandleGPU);
 			dxCommon->GetCommandList()->SetGraphicsRootConstantBufferView(3, resourceDirectionalLightSphere->GetGPUVirtualAddress());
+			dxCommon->GetCommandList()->SetGraphicsRootConstantBufferView(4, cameraResource->GetGPUVirtualAddress());
 
 			dxCommon->GetCommandList()->DrawIndexedInstanced(indexCount, 1, 0, 0, 0);
 		}
